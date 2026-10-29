@@ -1,17 +1,19 @@
-name: Android APK Release
+name: Android APK Build & Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
-  workflow_dispatch:
+  workflow_dispatch: # Allows triggering directly from GitHub website on iPhone/Android/PC
 
 permissions:
   contents: write
 
 jobs:
   build-apk:
-    name: Build & Release APK
+    name: Build Mobile & TV APKs
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -26,17 +28,52 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Make Gradlew Executable
-        run: chmod +x gradlew || true
-
-      - name: Build Android Release APK
+      - name: Locate Gradle project & Grant permissions
         run: |
           if [ -f "./gradlew" ]; then
-            ./gradlew assembleRelease --stacktrace || ./gradlew assembleDebug --stacktrace
+            GRADLE_DIR="."
+          elif [ -f "./anilili-main/gradlew" ]; then
+            GRADLE_DIR="./anilili-main"
+          else
+            echo "Searching for gradlew..."
+            GRADLE_DIR=$(dirname $(find . -name "gradlew" -print -quit))
           fi
+          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
+          chmod +x "$GRADLE_DIR/gradlew"
 
-      - name: Upload APK Release Asset
+      - name: Build APKs (Mobile & TV)
+        run: |
+          cd "$GRADLE_DIR"
+          # assembleDebug builds both mobile and tv APKs without requiring keystore credentials
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Prepare APKs for Release
+        run: |
+          mkdir -p release-apks
+          # Find and copy generated APKs
+          find . -name "*.apk" -type f -exec cp {} release-apks/ \;
+          echo "Generated APK files:"
+          ls -la release-apks/
+
+      - name: Upload APKs as Workflow Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: anilili-release-apk
-          path: app/build/outputs/apk/**/*.apk
+          name: anilili-apks
+          path: release-apks/*.apk
+
+      - name: Create GitHub Release (If Tagged or on Demand)
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ github.ref_name || 'v1.4.2' }}
+          name: "Anilili / Rr anime Release ${{ github.ref_name || 'v1.4.2' }}"
+          draft: false
+          prerelease: false
+          files: release-apks/*.apk
+          body: |
+            ## 🚀 Automated Android APK Release
+            - Built automatically by GitHub Actions.
+            - Includes Phone/Tablet & Android TV / Fire TV APK builds.
+            - Ready to download and install.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
