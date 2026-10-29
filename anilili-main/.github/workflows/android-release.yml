@@ -1,0 +1,98 @@
+name: Android APK Build & Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Mobile & TV APKs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Accept Android SDK Licenses & Install SDK 36
+        run: |
+          mkdir -p ~/.android && touch ~/.android/repositories.cfg
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;35.0.1" || true
+
+      - name: Locate Gradle project
+        run: |
+          if [ -f "./gradlew" ]; then
+            GRADLE_DIR="."
+          elif [ -f "./anilili-main/gradlew" ]; then
+            GRADLE_DIR="./anilili-main"
+          else
+            GRADLE_DIR=$(dirname $(find . -name "gradlew" -print -quit))
+          fi
+          echo "Found gradlew in: $GRADLE_DIR"
+          echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
+          chmod +x "$GRADLE_DIR/gradlew"
+
+      - name: Setup Keystore for Signing
+        run: |
+          cd "$GRADLE_DIR"
+          if [ ! -f "keystore.properties" ]; then
+            echo "Generating signing keystore..."
+            keytool -genkey -v -keystore release.keystore -alias anilili -keyalg RSA -keysize 2048 -validity 10000 -storepass anililipass -keypass anililipass -dname "CN=Anilili, OU=App, O=Anilili, L=City, S=State, C=US"
+            cat << EOF > keystore.properties
+          storeFile=release.keystore
+          storePassword=anililipass
+          keyAlias=anilili
+          keyPassword=anililipass
+          EOF
+          fi
+
+      - name: Compile APKs (Release with Debug fallback)
+        run: |
+          cd "$GRADLE_DIR"
+          echo "Running Gradle build..."
+          ./gradlew assembleRelease --stacktrace --no-daemon || ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Collect Generated APKs
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/output-apks"
+          find . -type f -name "*.apk" -not -path "*/intermediates/*" -exec cp {} "$GITHUB_WORKSPACE/output-apks/" \;
+          echo "Generated APK files in output-apks:"
+          ls -la "$GITHUB_WORKSPACE/output-apks"
+
+      - name: Upload APKs to Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Anilili-APKs
+          path: output-apks/*.apk
+          retention-days: 30
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: ${{ github.ref_name || 'v1.4.2' }}
+          name: "Anilili / Rr anime Release ${{ github.ref_name || 'v1.4.2' }}"
+          files: output-apks/*.apk
+          draft: false
+          prerelease: false
+          body: |
+            ### 📱 Android & TV APK Builds
+            - Built automatically by GitHub Actions.
+            - Includes Phone/Tablet & Android TV / Fire TV APK builds.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

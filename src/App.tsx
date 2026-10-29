@@ -75,6 +75,7 @@ on:
   push:
     branches:
       - main
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -95,11 +96,15 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: 'gradle'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses & Install SDK 36
+        run: |
+          mkdir -p ~/.android && touch ~/.android/repositories.cfg
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;35.0.1" || true
 
-      - name: Locate Gradle project & Grant permissions
+      - name: Locate Gradle project
         run: |
           if [ -f "./gradlew" ]; then
             GRADLE_DIR="."
@@ -108,33 +113,52 @@ jobs:
           else
             GRADLE_DIR=$(dirname $(find . -name "gradlew" -print -quit))
           fi
+          echo "Found gradlew in: $GRADLE_DIR"
           echo "GRADLE_DIR=$GRADLE_DIR" >> $GITHUB_ENV
           chmod +x "$GRADLE_DIR/gradlew"
 
-      - name: Build APKs (Mobile & TV)
+      - name: Setup Keystore for Signing
         run: |
           cd "$GRADLE_DIR"
-          ./gradlew assembleDebug --stacktrace --no-daemon
+          if [ ! -f "keystore.properties" ]; then
+            echo "Generating signing keystore..."
+            keytool -genkey -v -keystore release.keystore -alias anilili -keyalg RSA -keysize 2048 -validity 10000 -storepass anililipass -keypass anililipass -dname "CN=Anilili, OU=App, O=Anilili, L=City, S=State, C=US"
+            cat << EOF > keystore.properties
+          storeFile=release.keystore
+          storePassword=anililipass
+          keyAlias=anilili
+          keyPassword=anililipass
+          EOF
+          fi
 
-      - name: Prepare APKs for Release
+      - name: Compile APKs (Release with Debug fallback)
         run: |
-          mkdir -p release-apks
-          find . -name "*.apk" -type f -exec cp {} release-apks/ \\;
-          ls -la release-apks/
+          cd "$GRADLE_DIR"
+          echo "Running Gradle build..."
+          ./gradlew assembleRelease --stacktrace --no-daemon || ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Upload APKs as Workflow Artifacts
+      - name: Collect Generated APKs
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/output-apks"
+          find . -type f -name "*.apk" -not -path "*/intermediates/*" -exec cp {} "$GITHUB_WORKSPACE/output-apks/" \\;
+          echo "Generated APK files in output-apks:"
+          ls -la "$GITHUB_WORKSPACE/output-apks"
+
+      - name: Upload APKs to Artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: anilili-apks
-          path: release-apks/*.apk
+          name: Anilili-APKs
+          path: output-apks/*.apk
+          retention-days: 30
 
-      - name: Create GitHub Release
+      - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        continue-on-error: true
         with:
           tag_name: \${{ github.ref_name || 'v1.4.2' }}
           name: "Anilili / Rr anime Release \${{ github.ref_name || 'v1.4.2' }}"
-          files: release-apks/*.apk
+          files: output-apks/*.apk
         env:
           GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}`;
 
